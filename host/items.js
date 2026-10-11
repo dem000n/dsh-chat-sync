@@ -42,7 +42,19 @@ export function buildItems({ dshHome, profileDir }) {
        * this computer actually has.
        */
       roots: () => [
-        { kind: 'dir', absolute: home('sessions'), prefix: '' },
+        {
+          kind: 'dir',
+          absolute: home('sessions'),
+          prefix: '',
+          /*
+           * Per-machine artifacts that mean nothing on another computer: the
+           * POSIX write lease (an empty file, absent on Windows altogether) and
+           * migration staging files, which are transient by construction.
+           */
+          exclude: (relative) => relative.endsWith('/session.lock')
+            || relative.endsWith('.tmp')
+            || relative.includes('session.migration.'),
+        },
       ],
       place: 'session',
     },

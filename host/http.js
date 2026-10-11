@@ -106,7 +106,17 @@ export function createApiHandler(options) {
     'join': async (payload) => {
       const parsed = engine.parsePairCode(payload?.code);
       if (parsed.ok !== true) return parsed;
-      if (typeof payload?.token === 'string' && payload.token.trim() !== '') await setToken(payload.token);
+      /*
+       * The token may arrive in the pasted code (the wizard's "include the
+       * token in the code" option) or be typed into the form. The typed one
+       * wins; the embedded one is the whole point of that option. When neither
+       * is present the stored credential is left alone, so re-joining a store
+       * never wipes a token that already works.
+       */
+      const typed = typeof payload?.token === 'string' ? payload.token.trim() : '';
+      const embedded = typeof parsed.payload.token === 'string' ? parsed.payload.token.trim() : '';
+      const token = typed !== '' ? typed : embedded;
+      if (token !== '') await setToken(token);
       const result = await engine.configure({
         kind: parsed.payload.kind,
         remote: parsed.payload.remote,

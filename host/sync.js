@@ -361,17 +361,29 @@ export function createEngine({ config, logger, resolveToken, host = {} }) {
     let targetCwd = originalCwd;
     let rewrite = false;
     let relocated = false;
-    if (targetCwd !== undefined && !(await isDirectory(targetCwd))) {
-      const mapped = state.pathMap[projectKey(targetCwd)];
-      if (typeof mapped === 'string' && mapped !== '') {
-        targetCwd = mapped;
-        rewrite = true;
-      } else if (await createProjectFolder(targetCwd)) {
-        targetCwd = originalCwd;
-      } else {
-        targetCwd = portableWorkspacePath();
-        rewrite = true;
-        relocated = true;
+    if (originalCwd === undefined) {
+      // A chat recorded without a folder belongs to the Harness's own
+      // `_no-cwd` group and needs nothing changed on this computer.
+      targetCwd = undefined;
+    } else {
+      // A folder recorded by another operating system can never be this
+      // computer's folder, whatever the filesystem happens to answer: a Windows
+      // path on macOS is an ordinary relative name, and a POSIX path on Windows
+      // resolves against the current drive. Such a chat goes straight to the
+      // shared folder instead.
+      const recordedHere = samePlatformPath(originalCwd);
+      if (!recordedHere || !(await isDirectory(originalCwd))) {
+        const mapped = state.pathMap[projectKey(originalCwd)];
+        if (typeof mapped === 'string' && mapped !== '') {
+          targetCwd = mapped;
+          rewrite = true;
+        } else if (recordedHere && (await createProjectFolder(originalCwd))) {
+          targetCwd = originalCwd;
+        } else {
+          targetCwd = portableWorkspacePath();
+          rewrite = true;
+          relocated = true;
+        }
       }
     }
     // The directory name is not cosmetic: the Harness compares the physical
@@ -431,11 +443,33 @@ export function createEngine({ config, logger, resolveToken, host = {} }) {
   }
 
   /**
+   * Whether a recorded folder is spelled the way this operating system spells
+   * absolute paths.
+   * @param cwd - the folder recorded in a chat's header.
+   * @returns true when the path could belong to this computer.
+   */
+  function samePlatformPath(cwd) {
+    const windowsStyle = /^[A-Za-z]:[\\/]/.test(cwd) || cwd.startsWith('\\\\');
+    if (process.platform === 'win32') return windowsStyle;
+    return !windowsStyle && cwd.startsWith('/');
+  }
+
+  /**
    * Create the folder a chat was started in, when this computer can.
-   * @param cwd - the recorded folder.
-   * @returns true when the folder now exists.
+   *
+   * A chat may have been started on another operating system, and then its
+   * recorded folder is not a path this computer can have at all: a Windows
+   * drive path is a meaningless (and creatable!) relative name on macOS, and a
+   * POSIX path on Windows resolves against the current drive. Creating such a
+   * folder would scatter junk directories, so paths of the wrong shape are
+   * refused here and the chat takes the shared-folder route instead.
+   * @param cwd - the folder recorded in the chat's header.
+   * @returns true when the folder exists here now.
    */
   async function createProjectFolder(cwd) {
+    if (!path.isAbsolute(cwd)) return false;
+    const windowsStyle = /^[A-Za-z]:[\\/]/.test(cwd) || cwd.startsWith('\\\\');
+    if (process.platform === 'win32' ? !windowsStyle : windowsStyle || !cwd.startsWith('/')) return false;
     try {
       await ensureDir(cwd);
       return await isDirectory(cwd);

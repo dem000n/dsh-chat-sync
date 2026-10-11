@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-chat-sync",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Sync chats, attachments and settings between computers through a private git repository",
   "icon": "./icon.svg",

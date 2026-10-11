@@ -63,8 +63,7 @@ export function createStore(options) {
    */
   async function prepare() {
     await ensureDir(root);
-    if (kind === 'folder') {
-      const marker = path.join(root, FOLDER_MARKER);
+    if (kind === 'folder') {      const marker = path.join(root, FOLDER_MARKER);
       if (!(await exists(marker))) {
         await writeJsonAtomic(marker, { kind: 'dsh-sync-store', version: 1, createdAt: new Date().toISOString() });
       }
@@ -75,6 +74,10 @@ export function createStore(options) {
       await runGitOrThrow(['init', '-b', branch]);
       await runGitOrThrow(['config', 'user.name', 'DSH Sync']);
       await runGitOrThrow(['config', 'user.email', 'dsh-sync@localhost']);
+      // Session directories are long by construction (the project key alone is
+      // up to 251 characters), and a store path can push a file past the
+      // Windows limit; long paths let git index it anyway.
+      await runGitOrThrow(['config', 'core.longpaths', 'true']);
       await runGitOrThrow(['config', 'core.autocrlf', 'false']);
       if (remote !== '') {
         await runGitOrThrow(['remote', 'add', 'origin', remote]);
@@ -85,6 +88,10 @@ export function createStore(options) {
       if (current.code !== 0) await runGitOrThrow(['remote', 'add', 'origin', remote]);
       else if (url !== remote) await runGitOrThrow(['remote', 'set-url', 'origin', remote]);
     }
+    // Repair these on an existing repository too: a store created before they
+    // were set still needs them, and setting them is idempotent.
+    await runGit(['config', 'core.longpaths', 'true']);
+    await runGit(['config', 'core.autocrlf', 'false']);
     await ensureDir(devicesDir());
     await ensureDir(path.join(root, SNAPSHOTS_DIR));
   }
@@ -96,32 +103,64 @@ export function createStore(options) {
   async function pull() {
     if (kind === 'folder') return { pulled: false, reason: 'folder' };
     await prepare();
-    const heads = await runGit(['ls-remote', '--heads', 'origin']);
-    if (heads.code !== 0) {
-      throw new Error(`Не удалось связаться с репозиторием: ${(heads.stderr || heads.stdout).trim().split('\n').slice(-2).join(' ')}`);
+    const fetched = await runGit(['fetch', 'origin', '--prune'], { timeoutMs: 10 * 60 * 1000 });
+    if (fetched.code !== 0) {
+      throw new Error(`Не удалось связаться с репозиторием: ${lastLines(fetched)}`);
     }
-    const hasRemoteBranch = heads.stdout.split('\n').some((line) => line.endsWith(`refs/heads/${branch}`));
-    if (!hasRemoteBranch) {
-      // First computer to arrive: publish the branch on the first push.
+    const remoteRef = `refs/remotes/origin/${branch}`;
+    const hasRemoteBranch = await runGit(['rev-parse', '--verify', '--quiet', remoteRef]);
+    if (hasRemoteBranch.code !== 0) {
+      // No branch on the remote yet: this computer publishes the first one.
       const head = await runGit(['symbolic-ref', '--short', 'HEAD']);
       if (head.code !== 0 || head.stdout.trim() !== branch) await runGitOrThrow(['symbolic-ref', 'HEAD', `refs/heads/${branch}`]);
       return { pulled: false, reason: 'empty-remote' };
     }
-    const head = await runGit(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]);
-    if (head.code !== 0) {
+    const hasLocalBranch = await runGit(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]);
+    if (hasLocalBranch.code !== 0) {
+      // A computer joining an existing store: adopt the remote history as-is.
       await runGitOrThrow(['checkout', '-B', branch, `origin/${branch}`]);
-      return { pulled: true, reason: 'cloned-branch' };
+      return { pulled: true, reason: 'adopted-remote' };
     }
-    const result = await runGit(['pull', '--no-rebase', '--no-edit', 'origin', branch], { timeoutMs: 10 * 60 * 1000 });
-    if (result.code !== 0) {
-      const text = `${result.stderr}${result.stdout}`;
-      if (/unrelated histories/i.test(text)) {
-        await runGitOrThrow(['merge', '--no-rebase', '--no-edit', '--allow-unrelated-histories', `origin/${branch}`]);
-        return { pulled: true, reason: 'unrelated-histories-merged' };
-      }
-      throw new Error(`Не удалось получить изменения: ${text.trim().split('\n').slice(-3).join(' ')}`);
+    const merged = await runGit(['merge', '--no-edit', `origin/${branch}`], { timeoutMs: 10 * 60 * 1000 });
+    if (merged.code === 0) return { pulled: true, reason: 'merged' };
+    const text = `${merged.stderr}${merged.stdout}`;
+    if (/unrelated histories/i.test(text)) {
+      // Two computers that each created the store independently: their
+      // histories share no ancestor. Merging is safe because a computer only
+      // ever writes below its own device directory, so the trees are disjoint.
+      await runGitOrThrow(['merge', '--no-edit', '--allow-unrelated-histories', `origin/${branch}`], { timeoutMs: 10 * 60 * 1000 });
+      return { pulled: true, reason: 'unrelated-histories-merged' };
     }
-    return { pulled: true, reason: 'pulled' };
+    if (/would be overwritten|local changes|not possible because you have unmerged/i.test(text)) {
+      // Leftovers from an interrupted run: commit them first, then merge.
+      await commitPending('sync: local files kept before merging');
+      await runGitOrThrow(['merge', '--no-edit', `origin/${branch}`], { timeoutMs: 10 * 60 * 1000 });
+      return { pulled: true, reason: 'merged-after-commit' };
+    }
+    throw new Error(`Не удалось получить изменения: ${lastLines(merged)}`);
+  }
+
+  /**
+   * The last few lines of a git command's output, for a user-readable message.
+   * @param result - a finished git process.
+   * @returns the trimmed tail of its output.
+   */
+  function lastLines(result) {
+    const text = `${result.stderr}\n${result.stdout}`.split('\n').map((line) => line.trim()).filter((line) => line !== '');
+    return text.slice(-3).join(' ');
+  }
+
+  /**
+   * Commit whatever is pending in the working tree, if anything.
+   * @param message - the commit message.
+   * @returns whether a commit was created.
+   */
+  async function commitPending(message) {
+    await gitOrThrow(root, ['add', '-A'], { token: await resolveToken(), remote });
+    const status = await runGit(['status', '--porcelain']);
+    if (status.stdout.trim() === '') return false;
+    await runGitOrThrow(['-c', 'commit.gpgsign=false', 'commit', '-m', message]);
+    return true;
   }
 
   /**
@@ -155,23 +194,22 @@ export function createStore(options) {
    */
   async function commitAndPush(message) {
     if (kind === 'folder') return { pushed: false, reason: 'folder' };
-    await gitOrThrow(root, ['add', '-A'], { token: await resolveToken(), remote });
-    const status = await runGit(['status', '--porcelain']);
-    if (status.stdout.trim() === '') return { pushed: false, reason: 'nothing-to-commit' };
-    await runGitOrThrow(['-c', 'commit.gpgsign=false', 'commit', '-m', message]);
+    const committed = await commitPending(message);
+    if (committed === false) return { pushed: false, reason: 'nothing-to-commit' };
     const result = await runGit(['push', 'origin', `HEAD:${branch}`], { timeoutMs: 10 * 60 * 1000 });
     if (result.code !== 0) {
       const text = `${result.stderr}${result.stdout}`;
       if (/rejected|non-fast-forward|fetch first/i.test(text)) {
-        // Another computer pushed while we were working: rebase our single
-        // commit on top of theirs. Both sides only ever add their own folder,
-        // so this cannot produce a content conflict.
-        await runGitOrThrow(['pull', '--no-rebase', '--no-edit', 'origin', branch]);
-        const retry = await runGit(['push', 'origin', `HEAD:${branch}`]);
+        // Another computer pushed while we were working. Fold its history in —
+        // including the case where the two stores were created independently —
+        // and try once more; each computer only writes below its own folder, so
+        // this merge cannot conflict.
+        await pull();
+        const retry = await runGit(['push', 'origin', `HEAD:${branch}`], { timeoutMs: 10 * 60 * 1000 });
         if (retry.code === 0) return { pushed: true, reason: 'pushed-after-merge' };
-        throw new Error(`Не удалось отправить изменения: ${(retry.stderr || retry.stdout).trim().split('\n').slice(-3).join(' ')}`);
+        throw new Error(`Не удалось отправить изменения: ${lastLines(retry)}`);
       }
-      throw new Error(`Не удалось отправить изменения: ${text.trim().split('\n').slice(-3).join(' ')}`);
+      throw new Error(`Не удалось отправить изменения: ${lastLines(result)}`);
     }
     return { pushed: true, reason: 'pushed' };
   }
