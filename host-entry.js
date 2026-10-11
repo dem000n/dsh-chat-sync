@@ -149,7 +149,7 @@ export function apply(ctx, config = {}) {
   async function setToken(credentials, token) {
     const value = String(token ?? '').trim();
     if (credentials === undefined) {
-      if (value !== '') throw new Error('Хранилище секретов недоступно: токен не сохранён.');
+      if (value !== '') throw new Error('Хранилище секретов недоступно, токен не сохранён. Перезапустите Harness и повторите.');
       return;
     }
     if (value === '') await credentials.unset(TOKEN_REF);
@@ -169,6 +169,31 @@ export function apply(ctx, config = {}) {
     } catch {
       return { configured: false, writable: false, source: undefined };
     }
+  }
+
+  /** Reference kept by the injected scope below. */
+  let injectedCredentials;
+
+  /**
+   * The credential service, resolved when it is needed rather than once.
+   *
+   * This plugin activates together with the boot tree, and a service another
+   * bundle registers is not necessarily there yet at that moment. Capturing it
+   * once left the stored git token unreadable — and unwritable — for the whole
+   * process. The injected scope covers a service that arrives later, and the
+   * plain lookup covers every call after that.
+   * @returns the service, or `undefined` when this deployment has none.
+   */
+  function credentialsNow() {
+    return ctx.get('credentials') ?? injectedCredentials;
+  }
+
+  try {
+    ctx.inject(['credentials'], (scope) => {
+      injectedCredentials = scope.credentials;
+    });
+  } catch {
+    /* the plain lookup still finds the service once it exists */
   }
 
   /** Re-arm the background timer whenever the interval setting changes. */
@@ -205,12 +230,12 @@ export function apply(ctx, config = {}) {
       logger?.error?.(loaded.error);
       return;
     }
-    const credentials = ctx.get('credentials');
     const engine = loaded.createEngine({
       config,
       logger,
       host: createHostAdapter(ctx),
       resolveToken: async () => {
+        const credentials = credentialsNow();
         if (credentials === undefined) return '';
         try {
           const resolved = await credentials.resolve(TOKEN_REF);
@@ -224,8 +249,8 @@ export function apply(ctx, config = {}) {
     handler = loaded.api.createApiHandler({
       engine,
       logger,
-      setToken: (token) => setToken(credentials, token),
-      describeToken: () => describeToken(credentials),
+      setToken: (token) => setToken(credentialsNow(), token),
+      describeToken: () => describeToken(credentialsNow()),
       triggerSync,
       onSettingsChanged: () => armTimer(engine),
     });

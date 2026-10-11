@@ -97,7 +97,15 @@ export function createApiHandler(options) {
     },
     'prepareRemote': (payload) => engine.prepareRemote(payload ?? {}),
     'setup': async (payload) => {
-      if (typeof payload?.token === 'string') await setToken(payload.token);
+      /*
+       * Only a token the user actually typed is written. An empty field must
+       * leave an already stored token alone: that field is empty precisely when
+       * the token is already saved, so treating an empty value as "remove"
+       * would delete a working credential on the most ordinary run of the
+       * wizard.
+       */
+      const typed = typeof payload?.token === 'string' ? payload.token.trim() : '';
+      if (typed !== '') await setToken(typed);
       const result = await engine.configure(payload ?? {});
       if (result.ok !== true) return result;
       await onSettingsChanged?.();
