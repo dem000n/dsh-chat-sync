@@ -1,0 +1,5 @@
+# Nothing here is needed to run the plugin; these are local development leftovers.
+node_modules/
+*.log
+.DS_Store
+Thumbs.db

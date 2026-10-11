@@ -1,0 +1,16 @@
+# dsh-sync bundle layer: inserts the one Host row that owns chat synchronization.
+# The browser half is served automatically through the package's `dsh.client`
+# declaration, so no second row is needed.
+#
+# The row names its entry by a path relative to this file rather than by package
+# name: a bundle's own files are always resolvable beside its patch, while a bare
+# package name depends on how the deployment resolves rows.
+#
+# Optional deployment-level setting, normally left alone because the page owns
+# it: `portableWorkspace` names the folder used for chats whose own folder does
+# not exist on this computer. An empty value selects `~/Documents/DSH-Sync`.
+- insert:
+    - id: dsh-chat-sync
+      name: './host-entry.js'
+      config:
+        portableWorkspace: ''

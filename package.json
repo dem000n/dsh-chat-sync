@@ -1,0 +1,36 @@
+{
+  "name": "@local/dsh-chat-sync",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Sync chats, attachments and settings between computers through a private git repository",
+  "icon": "./icon.svg",
+  "type": "module",
+  "exports": {
+    ".": "./host-entry.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "host-entry.js",
+    "client.js",
+    "host",
+    "icon.svg",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}
